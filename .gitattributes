@@ -1,0 +1,3 @@
+# Preserve exact line-ending fixtures; ordinary source remains checked.
+/fixtures/crlf.* -text whitespace=cr-at-eol
+/fixtures/lone_cr.* -text whitespace=cr-at-eol

@@ -1,0 +1,89 @@
+import gramide.parser
+import gramide.tree
+import gramide.tags
+import self.grammar
+import self.lexer
+import self.symbols
+import self.table
+
+test "schema.sql parses with identical generated and dynamic trees" {
+  let source = "-- UTF-8: 日本語 schema and café data\nCREATE TABLE IF NOT EXISTS users (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  email TEXT NOT NULL UNIQUE,\n  display_name TEXT DEFAULT 'anonymous',\n  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))\n);\nCREATE TABLE visits (\n  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n  happened_at TEXT DEFAULT CURRENT_TIMESTAMP,\n  duration REAL CHECK (duration >= 0),\n  PRIMARY KEY (user_id, happened_at)\n);\nCREATE UNIQUE INDEX users_email ON users(email COLLATE nocase);\nCREATE VIEW active_users AS SELECT id, email FROM users WHERE active = 1;\n"
+  let tokens = lexer.scan(source, false)!
+  let dynamic = parser.parse(grammar.rules(), bytes.from_string(source), tokens)!
+  let compiled = parser.parse_with(table.compiled(), bytes.from_string(source), tokens)!
+  assert_eq(tree.sexp(dynamic.root, dynamic.names), tree.sexp(compiled.root, compiled.names))
+  let rows = tags.of_tree(compiled.root, tokens, bytes.from_string(source), compiled.names, ".", symbols.symbol_rules())
+  assert(list.any(rows, (row) => row.name == "users"))
+  assert(list.any(rows, (row) => row.name == "visits"))
+  assert(list.any(rows, (row) => row.name == "users_email"))
+  assert(list.any(rows, (row) => row.name == "active_users"))
+  assert(list.any(rows, (row) => row.name == "users.email"))
+}
+
+test "queries.sql parses with identical generated and dynamic trees" {
+  let source = "WITH RECURSIVE numbers(n) AS (\n  VALUES (1)\n  UNION ALL\n  SELECT n + 1 FROM numbers WHERE n < 5\n)\nSELECT n, CASE WHEN n % 2 = 0 THEN 'even' ELSE 'odd' END AS parity\nFROM numbers ORDER BY n DESC LIMIT 3 OFFSET 1;\n\nSELECT u.display_name, count(v.user_id) AS visits,\n       sum(v.duration) FILTER (WHERE v.duration > 0) OVER (\n         PARTITION BY u.id ORDER BY v.happened_at\n         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n       ) AS rolling\nFROM users AS u LEFT OUTER JOIN visits AS v ON u.id = v.user_id\nWHERE u.active IS NOT NULL AND u.email NOT LIKE '%@invalid' ESCAPE '\\'\nGROUP BY u.id HAVING count(*) > 0;\n"
+  let tokens = lexer.scan(source, false)!
+  let dynamic = parser.parse(grammar.rules(), bytes.from_string(source), tokens)!
+  let compiled = parser.parse_with(table.compiled(), bytes.from_string(source), tokens)!
+  assert_eq(tree.sexp(dynamic.root, dynamic.names), tree.sexp(compiled.root, compiled.names))
+  let rows = tags.of_tree(compiled.root, tokens, bytes.from_string(source), compiled.names, ".", symbols.symbol_rules())
+  assert(list.any(rows, (row) => row.name == "numbers"))
+}
+
+test "mutations.sql parses with identical generated and dynamic trees" {
+  let source = "BEGIN IMMEDIATE TRANSACTION;\nINSERT INTO users(email, display_name) VALUES\n  ('demo@example.test', '日本語'), ('other@example.test', 'O''Brien')\nON CONFLICT(email) DO UPDATE SET display_name = 'updated'\nRETURNING id, email;\nUPDATE users SET active = 0 WHERE id IN (SELECT user_id FROM visits);\nDELETE FROM visits WHERE duration BETWEEN 0 AND 1 RETURNING *;\nALTER TABLE users ADD COLUMN score REAL DEFAULT 0;\nSAVEPOINT checkpoint;\nROLLBACK TO SAVEPOINT checkpoint;\nRELEASE checkpoint;\nCOMMIT;\n"
+  let tokens = lexer.scan(source, false)!
+  let dynamic = parser.parse(grammar.rules(), bytes.from_string(source), tokens)!
+  let compiled = parser.parse_with(table.compiled(), bytes.from_string(source), tokens)!
+  assert_eq(tree.sexp(dynamic.root, dynamic.names), tree.sexp(compiled.root, compiled.names))
+}
+
+test "quoted.sql parses with identical generated and dynamic trees" {
+  let source = "CrEaTe TaBlE \"日本の表\" (\n  \"名\" TEXT,\n  [value] BLOB,\n  `weird``name` INTEGER\n);\nInSeRt InTo \"日本の表\" (\"名\", [value]) VaLuEs ('café', X'CAFE');\nSeLeCt \"名\", [value], :parameter, ?1 FROM \"日本の表\";\n"
+  let tokens = lexer.scan(source, false)!
+  let dynamic = parser.parse(grammar.rules(), bytes.from_string(source), tokens)!
+  let compiled = parser.parse_with(table.compiled(), bytes.from_string(source), tokens)!
+  assert_eq(tree.sexp(dynamic.root, dynamic.names), tree.sexp(compiled.root, compiled.names))
+  let rows = tags.of_tree(compiled.root, tokens, bytes.from_string(source), compiled.names, ".", symbols.symbol_rules())
+  assert(list.any(rows, (row) => row.name == "\"日本の表\""))
+  assert(list.any(rows, (row) => row.name == "\"日本の表\".\"名\""))
+  assert(list.any(rows, (row) => row.name == "\"日本の表\".[value]"))
+  assert(list.any(rows, (row) => row.name == "\"日本の表\".`weird``name`"))
+}
+
+test "broken.sql is not accepted by structural reading" {
+  assert(result.is_err(grammar.parse_src("CREATE TABLE broken (id INTEGER,);\n")))
+}
+
+test "broken_query.sql is not accepted by structural reading" {
+  assert(result.is_err(grammar.parse_src("SeLeCt FROM users;\n")))
+}
+
+test "broken_string.sql is not accepted by structural reading" {
+  assert(result.is_err(grammar.parse_src("INSERT INTO users VALUES ('unfinished);\n")))
+}
+
+test "broken_keyword.sql is not accepted by structural reading" {
+  assert(result.is_err(grammar.parse_src("selectx 1;\n")))
+}
+
+test "outline recovery can find a following intact declaration" {
+  let source = "CREATE TABLE broken (id,); CREATE TABLE saved(id INTEGER);"
+  let tokens = lexer.scan(source, true)!
+  let parsed = parser.parse_recovering(table.compiled(), bytes.from_string(source), tokens)!
+  let rows = tags.of_tree(parsed.root, tokens, bytes.from_string(source), parsed.names, ".", symbols.symbol_rules())
+  assert(list.any(rows, (row) => row.name == "saved"))
+  assert(result.is_err(grammar.parse_src(source)))
+}
+
+test "CRLF symbol coordinates stay inside original LF-counted source lines" {
+  let source = "-- UTF-8 日本語\r\nCREATE TABLE \"crlf_table\" (\r\n  \"crlf_column\" TEXT DEFAULT 'line one\r\nline two'\r\n);\r\n"
+  let tokens = lexer.scan(source, false)!
+  let parsed = parser.parse_with(table.compiled(), bytes.from_string(source), tokens)!
+  let rows = tags.of_tree(parsed.root, tokens, bytes.from_string(source), parsed.names, ".", symbols.symbol_rules())
+  let lines = tags.line_count(bytes.from_string(source))
+  for row in rows { assert(row.line >= 1 and row.end_line >= row.line and row.end_line <= lines) }
+}
+test "lone CR source is explicitly unsupported in strict readers" {
+  assert(result.is_err(lexer.scan("-- UTF-8 日本語\rCREATE TABLE \"crlf_table\" (\r  \"crlf_column\" TEXT DEFAULT 'line one\rline two'\r);\r", false)))
+}

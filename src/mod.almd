@@ -1,0 +1,13 @@
+// Read-only language package. No compiler-validity claim.
+import gramide.package_api
+import self.lexer
+import self.symbols
+import self.table
+
+let VERSION = "0.1.0"
+fn definition() -> package_api.Definition = package_api.Definition {
+  id: "sql", package_name: "gramide-sql", version: VERSION, extensions: [".sql"],
+  capabilities: ["tokens", "parse", "outline", "symbols", "tags", "map"],
+  lexer: () => (source, recovering) => lexer.scan(source, recovering),
+  grammar: () => table.compiled(), sep: ".", symbols: symbols.symbol_rules()
+}

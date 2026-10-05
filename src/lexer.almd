@@ -1,0 +1,158 @@
+// SQLite-style scanner. Keywords remain exact source bytes and use one
+// keyword token per ASCII letter because gramide 0.2.11 has no folded literal.
+import gramide.tree
+import gramide.lex
+let KEYWORDS = ["ABORT", "ACTION", "ADD", "ALL", "ALTER", "AND", "AS", "ASC", "AUTOINCREMENT", "BEGIN", "BETWEEN", "BY", "CASCADE", "CASE", "CAST", "CHECK", "COLLATE", "COLUMN", "COMMIT", "CONFLICT", "CONSTRAINT", "CREATE", "CROSS", "CURRENT", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "DEFAULT", "DEFERRABLE", "DEFERRED", "DELETE", "DESC", "DISTINCT", "DO", "DROP", "ELSE", "END", "ESCAPE", "EXCEPT", "EXCLUDE", "EXCLUSIVE", "EXISTS", "FAIL", "FILTER", "FIRST", "FOLLOWING", "FOREIGN", "FROM", "FULL", "GENERATED", "GLOB", "GROUP", "GROUPS", "HAVING", "IF", "IGNORE", "IMMEDIATE", "IN", "INDEX", "INDEXED", "INITIALLY", "INNER", "INSERT", "INTERSECT", "INTO", "IS", "JOIN", "KEY", "LAST", "LEFT", "LIKE", "LIMIT", "MATCH", "MATERIALIZED", "NATURAL", "NO", "NOT", "NOTHING", "NULL", "NULLS", "OF", "OFFSET", "ON", "OR", "ORDER", "OUTER", "OVER", "PARTITION", "PRAGMA", "PRECEDING", "PRIMARY", "RANGE", "RECURSIVE", "REFERENCES", "REGEXP", "REINDEX", "RELEASE", "RENAME", "REPLACE", "RESTRICT", "RETURNING", "RIGHT", "ROLLBACK", "ROW", "ROWS", "SAVEPOINT", "SELECT", "SET", "STORED", "STRICT", "TABLE", "TEMP", "TEMPORARY", "THEN", "TO", "TRANSACTION", "TRIGGER", "UNBOUNDED", "UNION", "UNIQUE", "UPDATE", "USING", "VACUUM", "VALUES", "VIEW", "VIRTUAL", "WHEN", "WHERE", "WINDOW", "WITH", "WITHOUT", "TRUE", "FALSE"]
+let OPERATORS = ["->>", "->", "||", "<<", ">>", "<=", ">=", "<>", "!=", "==", "+", "-", "*", "/", "%", "~", "&", "|", "<", ">", "=", "(", ")", ",", ";", ".", "?", ":", "@", "$"]
+fn at(s: Bytes, i: Int) -> Int = bytes.get_or(s, i, -1)
+fn digit(b: Int) -> Bool = b >= 48 and b <= 57
+fn hex(b: Int) -> Bool = digit(b) or (b >= 65 and b <= 70) or (b >= 97 and b <= 102)
+fn alpha(b: Int) -> Bool = b == 95 or b >= 128 or (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+fn same(s: Bytes, i: Int, text: String) -> Bool = {
+  let raw = bytes.from_string(text)
+  var j = 0
+  var yes = true
+  while yes and j < bytes.len(raw) { yes = at(s, i + j) == at(raw, j); j = j + 1 }
+  yes
+}
+fn quote_end(s: Bytes, i: Int) -> Int = {
+  let q = if at(s, i) == 91 then 93 else at(s, i)
+  var j = i + 1
+  var end = -1
+  while j < bytes.len(s) and end < 0 {
+    if at(s, j) == q then {
+      if q != 93 and at(s, j + 1) == q then j = j + 2 else end = j + 1
+    } else j = j + 1
+  }
+  end
+}
+fn number_end(s: Bytes, i: Int) -> Int = {
+  var j = i
+  if at(s, i) == 48 and (at(s, i + 1) == 120 or at(s, i + 1) == 88) then {
+    j = i + 2
+    while hex(at(s, j)) { j = j + 1 }
+    if j == i + 2 or alpha(at(s, j)) then -1 else j
+  } else {
+    while digit(at(s, j)) { j = j + 1 }
+    if at(s, j) == 46 then { j = j + 1; while digit(at(s, j)) { j = j + 1 } } else ()
+    var valid = true
+    if at(s, j) == 101 or at(s, j) == 69 then {
+      j = j + 1
+      if at(s, j) == 43 or at(s, j) == 45 then j = j + 1 else ()
+      let first = j
+      while digit(at(s, j)) { j = j + 1 }
+      valid = j > first
+    } else ()
+    if valid and not alpha(at(s, j)) then j else -1
+  }
+}
+fn scan(source: String, recovering: Bool) -> Result[List[tree.Token], lex.LexError] = {
+  let s = bytes.from_string(source)
+  // gramide 0.2.11 counts source lines by LF. Its multiline-token end
+  // calculation treats lone CR differently; reject that unsupported input
+  // in strict mode rather than publish inconsistent complete symbol ranges.
+  if not recovering then {
+    var pos = 0
+    var source_line = 1
+    var source_start = 0
+    while pos < bytes.len(s) {
+      guard at(s, pos) != 13 or at(s, pos + 1) == 10 else err(lex.LexError { line: source_line, col: pos - source_start + 1, message: "unsupported lone CR line ending; use LF or CRLF" })
+      if at(s, pos) == 10 then { source_line = source_line + 1; source_start = pos + 1 } else ()
+      pos = pos + 1
+    }
+  } else ()
+  var tokens: List[tree.Token] = []
+  var i = 0
+  var line = 1
+  var line_start = 0
+  while i < bytes.len(s) {
+    let start = i
+    let first_line = line
+    let first_col = i - line_start + 1
+    let b = at(s, i)
+    var kind = tree.T_NONE
+    var message = ""
+    if list.contains([9, 10, 11, 12, 13, 32], b) then i = i + 1
+    else if same(s, i, "--") then { while i < bytes.len(s) and at(s, i) != 10 and at(s, i) != 13 { i = i + 1 } }
+    else if same(s, i, "/*") then {
+      i = i + 2
+      while i < bytes.len(s) and not same(s, i, "*/") { i = i + 1 }
+      if i == bytes.len(s) then message = "unterminated SQL comment" else i = i + 2
+    } else if (b == 120 or b == 88) and at(s, i + 1) == 39 then {
+      kind = tree.T_BYTES
+      i = i + 2
+      let first = i
+      while hex(at(s, i)) { i = i + 1 }
+      if at(s, i) != 39 or (i - first) % 2 != 0 then message = "malformed blob literal" else i = i + 1
+    } else if list.contains([39, 34, 96, 91], b) then {
+      kind = if b == 39 then tree.T_STRING else tree.T_IDENTIFIER
+      let end = quote_end(s, i)
+      if end < 0 then { message = "unterminated SQL quoted value"; i = bytes.len(s) } else {
+        i = end
+        // The engine JSON fast path assumes names without double quotes or
+        // backslashes cannot contain other C0 controls. Enforce that contract
+        // for bracket/backtick identifiers rather than emit invalid JSON.
+        if b == 91 or b == 96 then {
+          var k = start + 1
+          while k < end - 1 {
+            if at(s, k) < 32 and not list.contains([9, 10, 13], at(s, k)) then message = "unsupported raw control byte in quoted identifier" else ()
+            k = k + 1
+          }
+        } else ()
+      }
+    } else if alpha(b) then {
+      i = i + 1
+      while alpha(at(s, i)) or digit(at(s, i)) or at(s, i) == 36 { i = i + 1 }
+      let word = string.to_upper(bytes.to_string_lossy(bytes.slice(s, start, i)))
+      if list.contains(KEYWORDS, word) then {
+        var j = start
+        while j < i {
+          list.push(tokens, tree.Token { kind: tree.T_KEYWORD, start: j, end: j + 1, line: first_line, col: first_col + j - start })
+          j = j + 1
+        }
+      } else kind = tree.T_IDENTIFIER
+    } else if digit(b) or (b == 46 and digit(at(s, i + 1))) then {
+      kind = tree.T_NUMBER
+      let end = number_end(s, i)
+      if end < 0 then { message = "malformed SQL number"; i = i + 1 } else i = end
+    } else {
+      var width = 0
+      for op in OPERATORS { if width == 0 and same(s, i, op) then width = bytes.len(bytes.from_string(op)) else () }
+      if width == 0 then { message = "unexpected SQL character"; i = i + 1 } else { kind = tree.T_PUNCT; i = i + width }
+    }
+    if message != "" then {
+      guard recovering else err(lex.LexError { line: first_line, col: first_col, message: message })
+      kind = tree.T_ERROR
+    } else ()
+    if kind != tree.T_NONE then list.push(tokens, tree.Token { kind: kind, start: start, end: i, line: first_line, col: first_col }) else ()
+    var j = start
+    while j < i {
+      if at(s, j) == 10 then { line = line + 1; line_start = j + 1 } else ()
+      j = j + 1
+    }
+  }
+  list.push(tokens, tree.Token { kind: tree.T_EOF, start: i, end: i, line: line, col: i - line_start + 1 })
+  ok(tokens)
+}
+test "SQL keyword matching never rewrites UTF-8 or quoted text" {
+  let src = "SeLeCt \"日本\", 'it''s', x'CAFE' FROM selectx"
+  let ts = scan(src, false)!
+  assert_eq(tree.token_text(bytes.from_string(src), list.get(ts, 6)!), "\"日本\"")
+  assert_eq((list.get(ts, 6)!).start, 7)
+  assert_eq((list.get(ts, 0)!).kind, tree.T_KEYWORD)
+  assert_eq((list.get(ts, list.len(ts) - 2)!).kind, tree.T_IDENTIFIER)
+}
+test "SQL lexical failures are strict" {
+  for src in ["'oops", "\"oops", "[oops", "/*oops", "x'abc'", "1e+"] { assert(result.is_err(scan(src, false))) }
+}
+
+test "strict scanners reject lone CR even inside multiline tokens" {
+  assert(result.is_err(scan("\r", false)))
+  assert(result.is_err(scan("/* \r */", false)))
+  assert(result.is_ok(scan("\r\n", false)))
+}
+
+test "unsafe raw controls in bracket and backtick names cannot reach symbols JSON" {
+  assert(result.is_err(scan("CREATE TABLE [a\u{0001}b](c);", false)))
+  assert(result.is_err(scan("CREATE TABLE `a\u{0002}b`(c);", false)))
+}

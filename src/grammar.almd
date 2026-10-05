@@ -1,0 +1,118 @@
+// Structural SQLite-style DDL/DML/query grammar. It does not resolve schemas.
+import gramide.parser
+import gramide.parser.{ tok, lit, keep, r, seq, alt, rep, rep1, opt, wrap, field, ahead, lits, keeps, grammar, recover_all, nott, leftf }
+import self.lexer
+let ident = tok("identifier")
+fn kw(word: String) -> parser.Rule = r("keyword_" + word)
+// Intern each keyword rule once; callers share compiled references rather than
+// duplicating the per-byte matcher at every SQL production.
+fn keyword_rules() -> List[(String, parser.Rule)] = list.map(lexer.KEYWORDS, (word) =>
+  ("keyword_" + word, seq(list.map(string.chars(word), (ch) => seq([ahead(tok("keyword")), alt([lit(string.to_upper(ch)), lit(string.to_lower(ch))])]))))
+)
+fn kws(words: List[String]) -> parser.Rule = alt(list.map(list.sort_by(words, (word) => 0 - string.len(word)), (word) => kw(word)))
+fn comma(one: parser.Rule) -> parser.Rule = seq([one, rep(seq([lit(","), one]))])
+fn parens(one: parser.Rule) -> parser.Rule = seq([lit("("), one, lit(")")])
+fn rules() -> parser.Grammar = grammar("source_file", [
+  ("source_file", wrap("source_file", seq([rep(lit(";")), rep(recover_all(seq([r("statement"), alt([rep1(lit(";")), ahead(tok("eof"))])])))]))),
+  ("statement", alt([r("create_table"), r("create_view"), r("create_index"), r("insert"), r("update"), r("delete"), r("select"), r("alter"), r("drop"), r("transaction"), r("pragma")])),
+  ("qualified", wrap("qualified_name", seq([ident, opt(seq([lit("."), ident]))]))),
+  ("if_not_exists", seq([kw("IF"), kw("NOT"), kw("EXISTS")])),
+  ("create_table", wrap("table_declaration", seq([kw("CREATE"), opt(kws(["TEMP", "TEMPORARY"])), kw("TABLE"), opt(r("if_not_exists")), field("name", r("qualified")), alt([
+    seq([parens(comma(alt([r("table_constraint"), r("column")]))), opt(comma(alt([seq([kw("WITHOUT"), ident]), kw("STRICT")])))]),
+    seq([kw("AS"), r("select")])
+  ])]))),
+  ("column", wrap("column_declaration", seq([field("name", ident), opt(r("type")), rep(r("column_constraint"))]))),
+  ("type", wrap("type_name", seq([rep1(ident), opt(parens(comma(seq([opt(lits(["+", "-"])), tok("number")]))))]))),
+  ("constraint_name", seq([kw("CONSTRAINT"), ident])),
+  ("conflict", seq([kw("ON"), kw("CONFLICT"), kws(["ROLLBACK", "ABORT", "FAIL", "IGNORE", "REPLACE"])])),
+  ("column_constraint", seq([opt(r("constraint_name")), alt([
+    seq([kw("PRIMARY"), kw("KEY"), opt(kws(["ASC", "DESC"])), opt(r("conflict")), opt(kw("AUTOINCREMENT"))]),
+    seq([kw("NOT"), kw("NULL"), opt(r("conflict"))]), seq([kw("UNIQUE"), opt(r("conflict"))]),
+    seq([kw("CHECK"), parens(r("expr"))]), seq([kw("DEFAULT"), alt([parens(r("expr")), r("unary")])]),
+    seq([kw("COLLATE"), ident]), r("references"),
+    seq([opt(seq([kw("GENERATED"), ident])), kw("AS"), parens(r("expr")), opt(kws(["STORED", "VIRTUAL"]))])
+  ])])),
+  ("table_constraint", seq([opt(r("constraint_name")), alt([
+    seq([alt([seq([kw("PRIMARY"), kw("KEY")]), kw("UNIQUE")]), parens(comma(r("ordering"))), opt(r("conflict"))]),
+    seq([kw("CHECK"), parens(r("expr"))]),
+    seq([kw("FOREIGN"), kw("KEY"), parens(comma(ident)), r("references")])
+  ])])),
+  ("references", seq([kw("REFERENCES"), r("qualified"), opt(parens(comma(ident))), rep(alt([
+    seq([kw("ON"), kws(["DELETE", "UPDATE"]), alt([seq([kw("SET"), kws(["NULL", "DEFAULT"])]), kws(["CASCADE", "RESTRICT"]), seq([kw("NO"), kw("ACTION")])])]),
+    seq([kw("MATCH"), ident])
+  ])), opt(seq([opt(kw("NOT")), kw("DEFERRABLE"), opt(seq([kw("INITIALLY"), kws(["DEFERRED", "IMMEDIATE"])]))]))])),
+  ("create_view", wrap("view_declaration", seq([kw("CREATE"), opt(kws(["TEMP", "TEMPORARY"])), kw("VIEW"), opt(r("if_not_exists")), field("name", r("qualified")), opt(parens(comma(ident))), kw("AS"), r("select")]))),
+  ("create_index", wrap("index_declaration", seq([kw("CREATE"), opt(kw("UNIQUE")), kw("INDEX"), opt(r("if_not_exists")), field("name", r("qualified")), kw("ON"), r("qualified"), parens(comma(r("ordering"))), opt(r("where"))]))),
+  ("with", seq([kw("WITH"), opt(kw("RECURSIVE")), comma(r("cte"))])),
+  ("cte", wrap("common_table", seq([field("name", ident), opt(parens(comma(ident))), kw("AS"), opt(seq([opt(kw("NOT")), kw("MATERIALIZED")])), parens(r("select"))]))),
+  ("select", wrap("select_statement", seq([opt(r("with")), r("select_core"), rep(seq([alt([seq([kw("UNION"), opt(kw("ALL"))]), kws(["INTERSECT", "EXCEPT"])]), r("select_core")])), opt(r("order")), opt(r("limit"))]))),
+  ("select_core", alt([
+    seq([kw("SELECT"), opt(kws(["DISTINCT", "ALL"])), comma(r("result_column")), opt(seq([kw("FROM"), r("from")])), opt(r("where")), opt(seq([kw("GROUP"), kw("BY"), comma(r("expr")), opt(seq([kw("HAVING"), r("expr")]))])), opt(seq([kw("WINDOW"), comma(seq([ident, kw("AS"), r("window")]))]))]),
+    seq([kw("VALUES"), comma(parens(comma(r("expr"))))])
+  ])),
+  ("result_column", alt([lit("*"), seq([ident, lit("."), lit("*")]), seq([r("expr"), opt(seq([opt(kw("AS")), ident]))])])),
+  ("from", seq([
+    r("table_ref"), rep(alt([
+      seq([lit(","), r("table_ref")]),
+      seq([r("join_operator"), r("table_ref"), opt(alt([
+        seq([kw("ON"), r("expr")]),
+        seq([kw("USING"), parens(comma(ident))])
+      ]))])
+    ]))
+  ])),
+  ("table_ref", seq([alt([parens(r("select")), parens(r("from")), seq([r("qualified"), opt(parens(opt(comma(r("expr")))))])]), opt(seq([opt(kw("AS")), ident])), opt(alt([seq([kw("INDEXED"), kw("BY"), ident]), seq([kw("NOT"), kw("INDEXED")])]))])),
+  ("join_operator", seq([opt(kw("NATURAL")), opt(alt([seq([kws(["LEFT", "RIGHT", "FULL"]), opt(kw("OUTER"))]), kws(["INNER", "CROSS"])])), kw("JOIN")])),
+  ("where", seq([kw("WHERE"), r("expr")])),
+  ("order", seq([kw("ORDER"), kw("BY"), comma(r("ordering"))])),
+  ("ordering", seq([r("expr"), opt(kws(["ASC", "DESC"])), opt(seq([kw("NULLS"), kws(["FIRST", "LAST"])]))])),
+  ("limit", seq([kw("LIMIT"), r("expr"), opt(seq([alt([kw("OFFSET"), lit(",")]), r("expr")]))])),
+  ("returning", seq([kw("RETURNING"), comma(r("result_column"))])),
+  ("insert", wrap("insert_statement", seq([opt(r("with")), alt([seq([kw("INSERT"), opt(seq([kw("OR"), kws(["ROLLBACK", "ABORT", "FAIL", "IGNORE", "REPLACE"])]))]), kw("REPLACE")]), kw("INTO"), r("qualified"), opt(seq([kw("AS"), ident])), opt(parens(comma(ident))), alt([seq([kw("DEFAULT"), kw("VALUES")]), r("select")]), rep(r("upsert")), opt(r("returning"))]))),
+  ("upsert", seq([kw("ON"), kw("CONFLICT"), opt(seq([parens(comma(r("ordering"))), opt(r("where"))])), kw("DO"), alt([kw("NOTHING"), seq([kw("UPDATE"), kw("SET"), comma(r("set_item")), opt(r("where"))])])])),
+  ("set_item", seq([alt([ident, parens(comma(ident))]), lit("="), r("expr")])),
+  ("update", wrap("update_statement", seq([opt(r("with")), kw("UPDATE"), opt(seq([kw("OR"), kws(["ROLLBACK", "ABORT", "FAIL", "IGNORE", "REPLACE"])])), r("qualified"), opt(seq([kw("AS"), ident])), kw("SET"), comma(r("set_item")), opt(seq([kw("FROM"), r("from")])), opt(r("where")), opt(r("returning"))]))),
+  ("delete", wrap("delete_statement", seq([opt(r("with")), kw("DELETE"), kw("FROM"), r("qualified"), opt(seq([kw("AS"), ident])), opt(r("where")), opt(r("returning"))]))),
+  ("alter", wrap("alter_statement", seq([kw("ALTER"), kw("TABLE"), r("qualified"), alt([seq([kw("RENAME"), kw("TO"), ident]), seq([kw("RENAME"), opt(kw("COLUMN")), ident, kw("TO"), ident]), seq([kw("ADD"), opt(kw("COLUMN")), r("column")]), seq([kw("DROP"), opt(kw("COLUMN")), ident])])]))),
+  ("drop", wrap("drop_statement", seq([kw("DROP"), kws(["TABLE", "VIEW", "INDEX", "TRIGGER"]), opt(seq([kw("IF"), kw("EXISTS")])), r("qualified")]))),
+  ("transaction", wrap("transaction_statement", alt([seq([kw("BEGIN"), opt(kws(["DEFERRED", "IMMEDIATE", "EXCLUSIVE"])), opt(kw("TRANSACTION"))]), seq([kws(["COMMIT", "END"]), opt(kw("TRANSACTION"))]), seq([kw("ROLLBACK"), opt(kw("TRANSACTION")), opt(seq([kw("TO"), opt(kw("SAVEPOINT")), ident]))]), seq([kw("SAVEPOINT"), ident]), seq([kw("RELEASE"), opt(kw("SAVEPOINT")), ident])]))),
+  ("pragma", wrap("pragma_statement", seq([kw("PRAGMA"), r("qualified"), opt(alt([seq([lit("="), r("expr")]), parens(r("expr"))]))]))),
+  ("expr", leftf("binary", r("and_expr"), kw("OR"))),
+  ("and_expr", leftf("binary", r("not_expr"), kw("AND"))),
+  ("not_expr", alt([wrap("unary", seq([kw("NOT"), r("not_expr")])), r("comparison")])),
+  ("comparison", seq([r("bitwise"), rep(alt([
+    seq([keeps(["=", "==", "!=", "<>", "<", ">", "<=", ">="]), r("bitwise")]),
+    seq([kw("IS"), opt(kw("NOT")), opt(seq([kw("DISTINCT"), kw("FROM")])), r("bitwise")]),
+    seq([opt(kw("NOT")), kw("BETWEEN"), r("bitwise"), kw("AND"), r("bitwise")]),
+    seq([opt(kw("NOT")), kw("IN"), alt([parens(opt(alt([r("select"), comma(r("expr"))]))), r("qualified")])]),
+    seq([opt(kw("NOT")), kws(["LIKE", "GLOB", "REGEXP", "MATCH"]), r("bitwise"), opt(seq([kw("ESCAPE"), r("bitwise")]))]),
+    seq([kw("NOT"), kw("NULL")])
+  ]))])),
+  ("bitwise", leftf("binary", r("sum"), keeps(["&", "|", "<<", ">>"]))),
+  ("sum", leftf("binary", r("product"), keeps(["+", "-"]))),
+  ("product", leftf("binary", r("concat"), keeps(["*", "/", "%"]))),
+  ("concat", leftf("binary", r("unary"), keeps(["||", "->", "->>"]))),
+  ("unary", alt([wrap("unary", seq([keeps(["+", "-", "~"]), r("unary")])), seq([r("primary"), rep(seq([kw("COLLATE"), ident]))])])),
+  ("primary", alt([
+    tok("number"), tok("string"), tok("bytes"), kws(["NULL", "TRUE", "FALSE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP"]),
+    r("case"), seq([kw("CAST"), parens(seq([r("expr"), kw("AS"), r("type")]))]),
+    seq([kw("EXISTS"), parens(r("select"))]),
+    seq([lit("?"), opt(tok("number"))]), seq([lits([":", "@", "$"]), ident]),
+    parens(alt([r("select"), comma(r("expr"))])),
+    wrap("function_call", seq([r("qualified"), r("arguments"), opt(seq([kw("FILTER"), parens(r("where"))])), opt(seq([kw("OVER"), alt([ident, r("window")])]))])),
+    wrap("column_reference", seq([ident, rep(seq([lit("."), ident]))]))
+  ])),
+  ("arguments", wrap("arguments", parens(opt(alt([lit("*"), seq([opt(kw("DISTINCT")), comma(r("expr")), opt(r("order"))])]))))),
+  ("case", wrap("case_expression", seq([kw("CASE"), opt(r("expr")), rep1(seq([kw("WHEN"), r("expr"), kw("THEN"), r("expr")])), opt(seq([kw("ELSE"), r("expr")])), kw("END")]))),
+  ("window", parens(seq([opt(ident), opt(seq([kw("PARTITION"), kw("BY"), comma(r("expr"))])), opt(r("order")), opt(seq([kws(["ROWS", "RANGE", "GROUPS"]), alt([seq([kw("BETWEEN"), r("frame_bound"), kw("AND"), r("frame_bound")]), r("frame_bound")]), opt(seq([kw("EXCLUDE"), alt([seq([kw("CURRENT"), kw("ROW")]), kw("GROUP"), ident, seq([kw("NO"), ident])])]))]))]))),
+  ("frame_bound", alt([seq([kw("UNBOUNDED"), kws(["PRECEDING", "FOLLOWING"])]), seq([kw("CURRENT"), kw("ROW")]), seq([r("expr"), kws(["PRECEDING", "FOLLOWING"])])]))
+] + keyword_rules())
+fn parse_src(source: String) -> Result[parser.Parsed, String] = {
+  let ts = lexer.scan(source, false) |> result.map_err((e) => e.message)!
+  parser.parse(rules(), bytes.from_string(source), ts) |> result.map_err((e) => parser.format_failure(e))
+}
+test "SQL mixed case queries constraints joins and DML" {
+  for src in ["SELECT current_time, CuRrEnT_TiMeStAmP, current_date;", "CrEaTe TaBlE users(id INTEGER PRIMARY KEY, name TEXT NOT NULL);", "SeLeCt u.name, count(*) AS n FrOm users AS u LEFT JOIN visits v ON v.id = u.id WHERE u.id BETWEEN 1 AND 9 GROUP BY u.name ORDER BY n DESC LIMIT 3;", "INSERT INTO users(id,name) VALUES (1,'A'),(2,'B') ON CONFLICT(id) DO UPDATE SET name = 'C';"] { assert(result.is_ok(parse_src(src))) }
+}
+test "SQL malformed structures and keyword prefixes are rejected" {
+  for src in ["selectx 1;", "SeLeCt FROM t;", "CREATE TABLE t (id INTEGER,);", "INSERT INTO t VALUES (1,);", "SELECT (1;", "UPDATE t SET id =;"] { assert(result.is_err(parse_src(src))) }
+}

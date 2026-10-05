@@ -1,0 +1,5 @@
+-- UTF-8 日本語
+CREATE TABLE "crlf_table" (
+  "crlf_column" TEXT DEFAULT 'line one
+line two'
+);

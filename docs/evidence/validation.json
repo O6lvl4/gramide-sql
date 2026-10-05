@@ -1,0 +1,39 @@
+{
+  "verified_at_utc": "2026-10-05T11:51:37Z",
+  "compiler": "almide 0.62.0",
+  "engine": "gramide v0.2.11",
+  "profile": "native correctness; no performance measurement",
+  "almide_test": {
+    "passed": true,
+    "reported_tests_including_imports": 80,
+    "source_test_declarations": 17,
+    "test_files": 3
+  },
+  "cli": {
+    "good_fixtures": 5,
+    "bad_fixtures": 6,
+    "commands": [
+      "symbols",
+      "parse",
+      "outline",
+      "tags",
+      "tokens"
+    ],
+    "utf8_byte_spans": true,
+    "rejects_check": true,
+    "rejects_symbols_recovered": true,
+    "bad_symbols_stdout_empty": true
+  },
+  "generated_table_matches": true,
+  "table_sha256": "a790f1661348dd4dcf100df7adbcb4b584461f61fb171caa80b1b7b876506060",
+  "limitations": "Structural reader only. See README for syntax and pinned-engine limits. No broad upstream conformance corpus.",
+  "sqlite_oracle": {
+    "version": "3.53.1",
+    "curated_statements": 35,
+    "fixture_files_agreeing": 9,
+    "intentional_rejections": [
+      "lone_cr.sql",
+      "control_name.sql"
+    ]
+  }
+}

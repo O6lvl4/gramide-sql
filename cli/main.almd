@@ -1,0 +1,11 @@
+import gramide.cli
+import gramide.tables
+import self as pkg
+import self.grammar
+import env
+
+effect fn main() -> Unit = {
+  let argv = env.args()
+  if list.get(argv, 0) == some("gen-table") then println(tables.render("sql", grammar.rules()))
+  else cli.run(cli.Program { name: "gramide_sql", version: "0.1.0", packages: [pkg.definition()] }, argv)!
+}

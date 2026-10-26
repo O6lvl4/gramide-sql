@@ -7,7 +7,7 @@ fn kw(word: String) -> parser.Rule = r("keyword_" + word)
 // Intern each keyword rule once; callers share compiled references rather than
 // duplicating the per-byte matcher at every SQL production.
 fn keyword_rules() -> List[(String, parser.Rule)] = list.map(lexer.KEYWORDS, (word) =>
-  ("keyword_" + word, seq(list.map(string.chars(word), (ch) => seq([ahead(tok("keyword")), alt([lit(string.to_upper(ch)), lit(string.to_lower(ch))])]))))
+  ("keyword_" + word, seq(list.map(string.to_list(word), (ch) => seq([ahead(tok("keyword")), alt([lit(string.to_upper(ch)), lit(string.to_lower(ch))])]))))
 )
 fn kws(words: List[String]) -> parser.Rule = alt(list.map(list.sort_by(words, (word) => 0 - string.len(word)), (word) => kw(word)))
 fn comma(one: parser.Rule) -> parser.Rule = seq([one, rep(seq([lit(","), one]))])

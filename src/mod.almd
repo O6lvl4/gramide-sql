@@ -4,7 +4,7 @@ import self.lexer
 import self.symbols
 import self.table
 
-let VERSION = "0.1.0"
+let VERSION = "0.1.1"
 fn definition() -> package_api.Definition = package_api.Definition {
   id: "sql", package_name: "gramide-sql", version: VERSION, extensions: [".sql"],
   capabilities: ["tokens", "parse", "outline", "symbols", "tags", "map"],
